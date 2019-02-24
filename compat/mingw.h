@@ -533,6 +533,25 @@ extern const char *program_data_config(void);
  * to an absolute path prefixed with '\\?\', and the new length is returned.
  * The path parameter must point to a buffer of MAX_LONG_PATH wide characters.
  *
+ * This function also escapes patch characters that are allowed in POSIX but not
+ * in Win32 paths, the same as WSL and MSYS2 does:
+ *
+ * Unescaped   | Escaped | character
+ * ------------+---------+----------
+ * 0022        |  f022   |    "
+ * 002a        |  f02a   |    *
+ * 003a        |  f03a   |    :
+ * 003c        |  f03c   |    <
+ * 003e        |  f03e   |    >
+ * 003f        |  f03f   |    ?
+ * 007c        |  f07c   |    |
+ *
+ * WSL also escapes backslash (005c), but that wouldn't be possible to do as long
+ * as Git accepts that as a path separator. The colon is also not escaped if it
+ * appears after a drive letter at the beginning of a path. However, by escaping
+ * colons at other locations in the filename, we won't be able to support NTFS
+ * alternate streams.
+ *
  * Parameters:
  * path: path to check and / or convert
  * len: size of path on input (number of wide chars without \0)
@@ -680,6 +699,29 @@ static inline int xutftowcs_long_path(wchar_t *wcs, const char *utf)
  * ERANGE: the output buffer is too small
  */
 int xwcstoutf(char *utf, const wchar_t *wcs, size_t utflen);
+
+/**
+ * Converts UTF-16LE encoded path string to UTF-8, while also
+ * unescaping specific unicode characters in the input:
+ *
+ * UTF-16   | UTF-8 | character
+ * ---------+-------+----------
+ * f022     |  22   |    "
+ * f02a     |  2a   |    *
+ * f03a     |  3a   |    :
+ * f03c     |  3c   |    <
+ * f03e     |  3e   |    >
+ * f03f     |  3f   |    ?
+ * f07c     |  7c   |    |
+ *
+ * This version of UTF16-to-UTF8 conversion must be done on input to
+ * git primarily from the file system (various file enumeration APIs),
+ * but also the command line to help simple interop with Win32 applications.
+ *
+ * Inside of the git UTF-8 realm, the forbidden Win32 path characters
+ * are used in unescaped form until they are passed to a Win32 file system API.
+ */
+int xwcstoutf_unescape_input(char *utf, wchar_t *wcs, size_t utflen);
 
 /*
  * A critical section used in the implementation of the spawn

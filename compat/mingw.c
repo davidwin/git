@@ -13,6 +13,7 @@
 #include "../attr.h"
 #include "../string-list.h"
 #include "win32/fscache.h"
+#include "win32/path-escape.h"
 
 #define HCAST(type, handle) ((type)(intptr_t)handle)
 
@@ -1227,13 +1228,13 @@ char *mingw_getcwd(char *pointer, int len)
 		CloseHandle(hnd);
 		if (!ret || ret >= ARRAY_SIZE(wpointer))
 			return NULL;
-		if (xwcstoutf(pointer, normalize_ntpath(wpointer), len) < 0)
+		if (xwcstoutf_unescape_input(pointer, normalize_ntpath(wpointer), len) < 0)
 			return NULL;
 		return pointer;
 	}
 	if (!ret || ret >= ARRAY_SIZE(wpointer))
 		return NULL;
-	if (xwcstoutf(pointer, wpointer, len) < 0)
+	if (xwcstoutf_unescape_input(pointer, wpointer, len) < 0)
 		return NULL;
 	convert_slashes(pointer);
 	return pointer;
@@ -2732,7 +2733,7 @@ int readlink(const char *path, char *buf, size_t bufsiz)
 	 * so convert to a (hopefully large enough) temporary buffer, then memcpy
 	 * the requested number of bytes (including '\0' for robustness).
 	 */
-	if ((len = xwcstoutf(tmpbuf, normalize_ntpath(wbuf), MAX_LONG_PATH)) < 0)
+	if ((len = xwcstoutf_unescape_input(tmpbuf, normalize_ntpath(wbuf), MAX_LONG_PATH)) < 0)
 		return -1;
 	memcpy(buf, tmpbuf, min(bufsiz, len + 1));
 	return min(bufsiz, len);
@@ -2902,6 +2903,22 @@ int xwcstoutf(char *utf, const wchar_t *wcs, size_t utflen)
 	return -1;
 }
 
+int xwcstoutf_unescape_input(char *utf, wchar_t *wcs, size_t utflen)
+{
+	if (!wcs || !utf || utflen < 1) {
+		errno = EINVAL;
+		return -1;
+	}
+	for( wchar_t * uwcs = wcs; *uwcs; uwcs++ ) {
+		path_unescape_char(wcs, uwcs);
+	}
+	utflen = WideCharToMultiByte(CP_UTF8, 0, wcs, -1, utf, utflen, NULL, NULL);
+	if (utflen)
+		return utflen - 1;
+	errno = ERANGE;
+	return -1;
+}
+
 static void setup_windows_environment(void)
 {
 	char *tmp = getenv("TMPDIR");
@@ -2972,6 +2989,28 @@ int handle_long_path(wchar_t *path, int len, int max_path, int expand)
 	int result;
 	wchar_t buf[MAX_LONG_PATH];
 
+	/* Escape ?:*<>"| (not \) using same rules as WSL/MSYS2. Escaping colons means
+	 * that we forego NTFS alternate data paths, but that isn't supported by Git anyway.
+	 */
+	wchar_t *escaped;
+
+	if (len > 3 && path[0] == '\\' && path[1] == '\\' && path[2] == '?' &&
+	    path[3] == '\\') {
+		/* Skip past \\?\ */
+		escaped = path + 4;
+	} else if (len > 1 && path[1] == ':' && isalpha(path[0])) {
+		/* Skip past drive letters. MSYS2 doesn't treat a path like "C:File.txt"
+		 * as a drive-rooted path, but git does, so we have to let that through
+		 * as well.
+		 */
+		escaped = path + 2;
+	} else {
+		escaped = path;
+	}
+	while (*escaped) {
+		path_escape_char(escaped++);
+	}
+
 	/*
 	 * we don't need special handling if path is relative to the current
 	 * directory, and current directory + path don't exceed the desired
@@ -2999,9 +3038,9 @@ int handle_long_path(wchar_t *path, int len, int max_path, int expand)
 	}
 
 	/*
-	 * return absolute path if it fits within max_path (even if
-	 * "cwd + path" doesn't due to '..' components)
-	 */
+	* return absolute path if it fits within max_path (even if
+	* "cwd + path" doesn't due to '..' components)
+	*/
 	if (result < max_path) {
 		wcscpy(path, buf);
 		return result;
@@ -3051,9 +3090,9 @@ static void *malloc_startup(size_t size)
 	return result;
 }
 
-static char *wcstoutfdup_startup(char *buffer, const wchar_t *wcs, size_t len)
+static char *wcstoutfdup_startup(char *buffer, wchar_t *wcs, size_t len)
 {
-	len = xwcstoutf(buffer, wcs, len) + 1;
+	len = xwcstoutf_unescape_input(buffer, wcs, len) + 1;
 	return memcpy(malloc_startup(len), buffer, len);
 }
 
@@ -3157,6 +3196,7 @@ int wmain(int argc, const wchar_t **wargv)
 {
 	int i, maxlen, exit_status;
 	char *buffer, **save;
+	wchar_t *wbuffer;
 	const char **argv;
 
 #ifdef _MSC_VER
@@ -3180,7 +3220,8 @@ int wmain(int argc, const wchar_t **wargv)
 	for (i = 1; i < argc; i++)
 		maxlen = max(maxlen, wcslen(wargv[i]));
 
-	/* allocate buffer (wchar_t encodes to max 3 UTF-8 bytes) */
+	/* allocate buffers (wchar_t encodes to max 3 UTF-8 bytes) */
+	wbuffer = malloc_startup(2*maxlen + 2);
 	maxlen = 3 * maxlen + 1;
 	buffer = malloc_startup(maxlen);
 
@@ -3191,10 +3232,13 @@ int wmain(int argc, const wchar_t **wargv)
 	 */
 	ALLOC_ARRAY(argv, argc + 1);
 	ALLOC_ARRAY(save, argc + 1);
-	for (i = 0; i < argc; i++)
-		argv[i] = save[i] = wcstoutfdup_startup(buffer, wargv[i], maxlen);
+	for (i = 0; i < argc; i++) {
+		wcscpy(wbuffer, wargv[i]);
+		argv[i] = save[i] = wcstoutfdup_startup(buffer, wbuffer, maxlen);
+	}
 	argv[i] = save[i] = NULL;
 	free(buffer);
+	free(wbuffer);
 
 	/* fix Windows specific environment settings */
 	setup_windows_environment();

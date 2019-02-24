@@ -5,6 +5,7 @@
 #include "config.h"
 #include "../../mem-pool.h"
 #include "ntifs.h"
+#include "path-escape.h"
 
 static volatile long initialized;
 static DWORD dwTlsIndex;
@@ -283,7 +284,10 @@ static struct fsentry *fsentry_create_list(struct fscache *cache, const struct f
 	}
 	di = (PFILE_FULL_DIR_INFORMATION)(cache->buffer);
 	for (;;) {
-
+		/* Unescape NTFS forbidden chars */
+		for (ULONG wpos = 0; wpos < di->FileNameLength; wpos++) {
+			path_unescape_char(di->FileName, di->FileName + wpos);
+		}
 		*phead = fseentry_create_entry(cache, list, di);
 		phead = &(*phead)->next;
 

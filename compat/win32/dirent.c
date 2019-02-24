@@ -1,4 +1,5 @@
 #include "../../git-compat-util.h"
+#include "path-escape.h"
 
 typedef struct dirent_DIR {
 	struct DIR base_dir;  /* extend base struct DIR */
@@ -13,7 +14,7 @@ DIR *(*opendir)(const char *dirname) = dirent_opendir;
 static inline void finddata2dirent(struct dirent *ent, WIN32_FIND_DATAW *fdata)
 {
 	/* convert UTF-16 name to UTF-8 (d_name points to dirent_DIR.dd_name) */
-	xwcstoutf(ent->d_name, fdata->cFileName, MAX_PATH * 3);
+	xwcstoutf_unescape_input(ent->d_name, fdata->cFileName, MAX_PATH * 3);
 
 	/* Set file type, based on WIN32_FIND_DATA */
 	if ((fdata->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
